@@ -1,274 +1,102 @@
-# import os
-# import torch
-# from torch.utils.data import DataLoader, TensorDataset
-# from datasets import load_dataset
-# from transformers import AutoTokenizer
-# import requests
-
-# def get_dataloaders(config):
-#     """根据配置加载、处理并返回训练和验证 DataLoader"""
-    
-#     device = torch.device(config["device"])
-    
-#     # 如果用户指定了本地数据路径，优先使用本地文件（支持 tiny_shakespeare 的纯文本）
-#     local_path = config.get('local_dataset_path', None)
-#     if local_path:
-#         local_path = os.path.expanduser(local_path)
-#         if os.path.isfile(local_path):
-#             print(f"检测到本地数据文件: {local_path}，将从本地加载（降级处理为 tiny_shakespeare 文本格式）...")
-#             with open(local_path, 'r', encoding='utf-8') as f:
-#                 full_text = f.read()
-#             cut = int(len(full_text) * 0.9)
-#             train_text = full_text[:cut]
-#             val_text = full_text[cut:]
-#             dataset = {
-#                 'train': [{'text': train_text}],
-#                 'validation': [{'text': val_text}]
-#             }
-#         else:
-#             raise FileNotFoundError(f"指定的本地数据文件不存在: {local_path}")
-
-#     else:
-#         # --- 步骤 1: 加载数据集 ---
-#         print(f"加载数据集 '{config['dataset_name']}'...")
-#         try:
-#             # 不再使用 trust_remote_code（已废弃/不支持）
-#             dataset = load_dataset(config['dataset_name'], config.get('dataset_config'))
-#         except RuntimeError as e:
-#             # 兼容 tiny_shakespeare 的降级处理（datasets 不再支持脚本式数据集）
-#             msg = str(e)
-#             if 'tiny_shakespeare' in config['dataset_name'] or 'karpathy/tiny_shakespeare' in config['dataset_name'] or 'tiny_shakespeare.py' in msg:
-#                 print("检测到 tiny_shakespeare 数据集脚本不被支持，改为从 karpathy GitHub raw 下载文本作为降级处理...")
-#                 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-#                 r = requests.get(url, timeout=20)
-#                 r.raise_for_status()
-#                 full_text = r.text
-#                 # 90% 作为 train，10% 作为 validation（按字符切分，并放入单条记录以兼容后续处理）
-#                 cut = int(len(full_text) * 0.9)
-#                 train_text = full_text[:cut]
-#                 val_text = full_text[cut:]
-#                 dataset = {
-#                     'train': [{'text': train_text}],
-#                     'validation': [{'text': val_text}]
-#                 }
-#             else:
-#                 # 不是 tiny_shakespeare 的脚本问题，向上抛出以便用户处理
-#                 raise
-
-#     # --- 步骤 2: 初始化分词器和处理数据 ---
-#     if config['task_type'] == 'language_modeling':
-#         # 字符级分词器
-#         text = "".join([example[config['text_col']] for example in dataset['train']])
-#         chars = sorted(list(set(text)))
-#         vocab_size = len(chars)
-#         stoi = {ch: i for i, ch in enumerate(chars)}
-#         itos = {i: ch for i, ch in enumerate(chars)}
-#         encode = lambda s: [stoi[c] for c in s]
-        
-#         train_data = torch.tensor(encode("".join(d[config['text_col']] for d in dataset['train'])), dtype=torch.long)
-#         val_data = torch.tensor(encode("".join(d[config['text_col']] for d in dataset['validation'])), dtype=torch.long)
-
-#         # 创建 (X, Y) 数据对
-#         def create_lm_dataset(data_tensor, block_size):
-#             # 保证有足够的 token 用于输入和对应的右移目标
-#             num_sequences = (len(data_tensor) - 1) // block_size
-#             if num_sequences <= 0:
-#                 raise ValueError("数据太短，请增大数据或减小 max_len")
-#             data_tensor = data_tensor[: num_sequences * block_size + 1]  # +1 用于 targets 的右移
-#             X = data_tensor[:-1].view(num_sequences, block_size)
-#             Y = data_tensor[1:].view(num_sequences, block_size)
-#             return TensorDataset(X, Y)
-
-#         train_dataset = create_lm_dataset(train_data, config['max_len'])
-#         val_dataset = create_lm_dataset(val_data, config['max_len'])
-
-#         # 更新词汇表大小
-#         config['vocab_size'] = vocab_size
-
-#     elif config['task_type'] == 'sequence_to_sequence':
-#         tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_name'])
-        
-#         def tokenize_fn(examples):
-#             inputs = tokenizer(examples[config['src_lang_col']], max_length=config['max_len'], truncation=True, padding="max_length")
-#             labels = tokenizer(text_target=examples[config['tgt_lang_col']], max_length=config['max_len'], truncation=True, padding="max_length")
-#             inputs['labels'] = labels['input_ids']
-#             return inputs
-
-#         tokenized_datasets = dataset.map(tokenize_fn, batched=True, remove_columns=dataset['train'].column_names)
-#         tokenized_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-
-#         train_dataset = tokenized_datasets['train']
-#         val_dataset = tokenized_datasets['validation']
-        
-#         config['vocab_size'] = tokenizer.vocab_size
-#         config['pad_token_id'] = tokenizer.pad_token_id
-
-#     elif config['task_type'] == 'text_classification':
-#         tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_name'])
-        
-#         def tokenize_fn(examples):
-#             return tokenizer(examples[config['text_col']], max_length=config['max_len'], truncation=True, padding="max_length")
-
-#         tokenized_datasets = dataset.map(tokenize_fn, batched=True, remove_columns=[config['text_col']])
-#         tokenized_datasets = tokenized_datasets.rename_column(config['label_col'], 'labels')
-#         tokenized_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-        
-#         train_dataset = tokenized_datasets['train']
-#         # AG News 没有验证集，我们从测试集里分一个
-#         split_dataset = tokenized_datasets['test'].train_test_split(test_size=0.5)
-#         val_dataset = split_dataset['train']
-#         # test_dataset = split_dataset['test']
-
-#         config['vocab_size'] = tokenizer.vocab_size
-#         config['pad_token_id'] = tokenizer.pad_token_id
-
-#     else:
-#         raise ValueError(f"不支持的任务类型: {config['task_type']}")
-
-#     # --- 步骤 3: 创建 DataLoader ---
-#     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-#     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'])
-#     config['vocab_size'] = len(stoi)  # 在训练时动态生成词汇表大小
-#     config['stoi'] = stoi
-#     config['itos'] = itos
-#     return train_loader, val_loader, config
-
-
-
-
-
+# filepath: f:\transformer-project\src\dataset_utils.py
 import os
 import torch
-from torch.utils.data import DataLoader, TensorDataset
-from datasets import load_dataset
-from transformers import AutoTokenizer
-import requests
+from datasets import load_dataset, Dataset, DatasetDict
+from torch.utils.data import DataLoader
+# ---> 核心修正: 导入为 Seq2Seq 任务专门设计的 DataCollator <---
+from transformers import AutoTokenizer, DataCollatorForSeq2Seq
 
 def get_dataloaders(config):
-    """根据配置加载、处理并返回训练和验证 DataLoader"""
+    """
+    根据配置加载数据，支持从 Hugging Face Hub 或本地并行文件目录加载。
+    """
+    print("--- 正在准备数据加载器 ---")
+    tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_name'])
     
-    device = torch.device(config["device"])
-    
-    # 如果用户指定了本地数据路径，优先使用本地文件（支持 tiny_shakespeare 的纯文本）
-    local_path = config.get('local_dataset_path', None)
-    if local_path:
-        local_path = os.path.expanduser(local_path)
-        if os.path.isfile(local_path):
-            print(f"检测到本地数据文件: {local_path}，将从本地加载（降级处理为 tiny_shakespeare 文本格式）...")
-            with open(local_path, 'r', encoding='utf-8') as f:
-                full_text = f.read()
-            cut = int(len(full_text) * 0.9)
-            train_text = full_text[:cut]
-            val_text = full_text[cut:]
-            dataset = {
-                'train': [{'text': train_text}],
-                'validation': [{'text': val_text}]
-            }
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    config['pad_token_id'] = tokenizer.pad_token_id
+    config['vocab_size'] = tokenizer.vocab_size
+
+    raw_datasets = None
+
+    if config.get("local_dataset_path"):
+        local_path = config["local_dataset_path"]
+        print(f"检测到本地数据集配置，路径: {local_path}")
+
+        if os.path.isdir(local_path):
+            print("路径是一个目录，正在尝试加载并行文件 (train/val)...")
+            try:
+                train_src_file = os.path.join(local_path, f"train.{config['src_lang']}")
+                train_tgt_file = os.path.join(local_path, f"train.{config['tgt_lang']}")
+                # ---> 修正: 使用 'val' 而不是 'valid' 来匹配您的文件名 <---
+                val_src_file = os.path.join(local_path, f"valid.{config['src_lang']}")
+                val_tgt_file = os.path.join(local_path, f"valid.{config['tgt_lang']}")
+
+                with open(train_src_file, 'r', encoding='utf-8') as f:
+                    train_src_texts = [line.strip() for line in f]
+                with open(train_tgt_file, 'r', encoding='utf-8') as f:
+                    train_tgt_texts = [line.strip() for line in f]
+                
+                with open(val_src_file, 'r', encoding='utf-8') as f:
+                    val_src_texts = [line.strip() for line in f]
+                with open(val_tgt_file, 'r', encoding='utf-8') as f:
+                    val_tgt_texts = [line.strip() for line in f]
+
+                train_data = {'translation': [{config['src_lang']: en, config['tgt_lang']: de} for en, de in zip(train_src_texts, train_tgt_texts)]}
+                val_data = {'translation': [{config['src_lang']: en, config['tgt_lang']: de} for en, de in zip(val_src_texts, val_tgt_texts)]}
+                
+                train_dataset = Dataset.from_dict(train_data)
+                val_dataset = Dataset.from_dict(val_data)
+                
+                raw_datasets = DatasetDict({
+                    'train': train_dataset,
+                    'validation': val_dataset
+                })
+                print(f"成功从目录 {local_path} 加载 {len(raw_datasets['train'])} 条训练数据和 {len(raw_datasets['validation'])} 条验证数据。")
+
+            except FileNotFoundError as e:
+                print(f"错误: 在目录 {local_path} 中找不到预期的文件。")
+                raise e
         else:
-            raise FileNotFoundError(f"指定的本地数据文件不存在: {local_path}")
+            raise FileNotFoundError(f"指定的本地数据路径不是一个有效的目录: {local_path}")
+    
+    if raw_datasets is None:
+        print(f"未找到或加载本地数据失败，将从 Hugging Face Hub 下载 '{config['dataset_name']}'...")
+        raw_datasets = load_dataset(config['dataset_name'], config.get('dataset_config_name'))
 
-    else:
-        # --- 步骤 1: 加载数据集 ---
-        print(f"加载数据集 '{config['dataset_name']}'...")
-        try:
-            # 不再使用 trust_remote_code（已废弃/不支持）
-            dataset = load_dataset(config['dataset_name'], config.get('dataset_config'))
-        except RuntimeError as e:
-            # 兼容 tiny_shakespeare 的降级处理（datasets 不再支持脚本式数据集）
-            msg = str(e)
-            if 'tiny_shakespeare' in config['dataset_name'] or 'karpathy/tiny_shakespeare' in config['dataset_name'] or 'tiny_shakespeare.py' in msg:
-                print("检测到 tiny_shakespeare 数据集脚本不被支持，改为从 karpathy GitHub raw 下载文本作为降级处理...")
-                url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-                r = requests.get(url, timeout=20)
-                r.raise_for_status()
-                full_text = r.text
-                # 90% 作为 train，10% 作为 validation（按字符切分，并放入单条记录以兼容后续处理）
-                cut = int(len(full_text) * 0.9)
-                train_text = full_text[:cut]
-                val_text = full_text[cut:]
-                dataset = {
-                    'train': [{'text': train_text}],
-                    'validation': [{'text': val_text}]
-                }
-            else:
-                # 不是 tiny_shakespeare 的脚本问题，向上抛出以便用户处理
-                raise
-
-    # --- 步骤 2: 初始化分词器和处理数据 ---
-    if config['task_type'] == 'language_modeling':
-        # 字符级分词器
-        text = "".join([example[config['text_col']] for example in dataset['train']])
-        chars = sorted(list(set(text)))
-        vocab_size = len(chars)
-        stoi = {ch: i for i, ch in enumerate(chars)}
-        itos = {i: ch for i, ch in enumerate(chars)}
-        encode = lambda s: [stoi[c] for c in s]
+    def tokenize_fn(examples):
+        inputs = [ex[config['src_lang']] for ex in examples['translation']]
+        targets = [ex[config['tgt_lang']] for ex in examples['translation']]
         
-        train_data = torch.tensor(encode("".join(d[config['text_col']] for d in dataset['train'])), dtype=torch.long)
-        val_data = torch.tensor(encode("".join(d[config['text_col']] for d in dataset['validation'])), dtype=torch.long)
-
-        # 创建 (X, Y) 数据对
-        def create_lm_dataset(data_tensor, block_size):
-            # 保证有足够的 token 用于输入和对应的右移目标
-            num_sequences = (len(data_tensor) - 1) // block_size
-            if num_sequences <= 0:
-                raise ValueError("数据太短，请增大数据或减小 max_len")
-            data_tensor = data_tensor[: num_sequences * block_size + 1]  # +1 用于 targets 的右移
-            X = data_tensor[:-1].view(num_sequences, block_size)
-            Y = data_tensor[1:].view(num_sequences, block_size)
-            return TensorDataset(X, Y)
-
-        train_dataset = create_lm_dataset(train_data, config['max_len'])
-        val_dataset = create_lm_dataset(val_data, config['max_len'])
-
-        # 更新词汇表大小
-        config['vocab_size'] = vocab_size
-        # --- 修正 3: 将 stoi/itos 的赋值移到这里，确保逻辑闭环 ---
-        config['stoi'] = stoi
-        config['itos'] = itos
-
-    elif config['task_type'] == 'sequence_to_sequence':
-        tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_name'])
+        model_inputs = tokenizer(inputs, max_length=config['max_len'], truncation=True)
+        labels = tokenizer(targets, max_length=config['max_len'], truncation=True)
         
-        def tokenize_fn(examples):
-            inputs = tokenizer(examples[config['src_lang_col']], max_length=config['max_len'], truncation=True, padding="max_length")
-            labels = tokenizer(text_target=examples[config['tgt_lang_col']], max_length=config['max_len'], truncation=True, padding="max_length")
-            inputs['labels'] = labels['input_ids']
-            return inputs
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
 
-        tokenized_datasets = dataset.map(tokenize_fn, batched=True, remove_columns=dataset['train'].column_names)
-        tokenized_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
+    tokenized_datasets = raw_datasets.map(tokenize_fn, batched=True, remove_columns=raw_datasets["train"].column_names)
+    
+    # ---> 核心修正: 使用 DataCollatorForSeq2Seq <---
+    # 这个整理器专门为序列到序列任务设计，能正确处理输入和标签的填充。
+    # 它会自动用 -100 填充标签，这个值会被损失函数标准地忽略。
+    data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True)
 
-        train_dataset = tokenized_datasets['train']
-        val_dataset = tokenized_datasets['validation']
-        
-        config['vocab_size'] = tokenizer.vocab_size
-        config['pad_token_id'] = tokenizer.pad_token_id
+    # 创建 DataLoader
+    train_loader = DataLoader(
+        tokenized_datasets["train"],
+        batch_size=config['batch_size'],
+        shuffle=True,
+        collate_fn=data_collator
+    )
+    
+    val_loader = None
+    if "validation" in tokenized_datasets:
+        val_loader = DataLoader(
+            tokenized_datasets["validation"],
+            batch_size=config['batch_size'],
+            shuffle=False,
+            collate_fn=data_collator
+        )
 
-    elif config['task_type'] == 'text_classification':
-        tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_name'])
-        
-        def tokenize_fn(examples):
-            return tokenizer(examples[config['text_col']], max_length=config['max_len'], truncation=True, padding="max_length")
-
-        tokenized_datasets = dataset.map(tokenize_fn, batched=True, remove_columns=[config['text_col']])
-        tokenized_datasets = tokenized_datasets.rename_column(config['label_col'], 'labels')
-        tokenized_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-        
-        train_dataset = tokenized_datasets['train']
-        # AG News 没有验证集，我们从测试集里分一个
-        split_dataset = tokenized_datasets['test'].train_test_split(test_size=0.5)
-        val_dataset = split_dataset['train']
-        # test_dataset = split_dataset['test']
-
-        config['vocab_size'] = tokenizer.vocab_size
-        config['pad_token_id'] = tokenizer.pad_token_id
-
-    else:
-        raise ValueError(f"不支持的任务类型: {config['task_type']}")
-
-    # --- 步骤 3: 创建 DataLoader ---
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'])
-    # --- 修正 3: 从此处删除错误的全局赋值 ---
     return train_loader, val_loader, config
