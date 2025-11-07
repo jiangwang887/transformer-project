@@ -1,8 +1,9 @@
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F # <--- 确保在文件顶部导入
 from src.model import Transformer
 # get_config 实际上不再是必需的，因为配置将从检查点加载，但保留它以防万一
 from src.config import get_config 
+from transformers import AutoTokenizer # <--- 确保导入 AutoTokenizer
 
 def load_model_from_checkpoint(checkpoint_path):
     """
@@ -60,7 +61,9 @@ def load_model_from_checkpoint(checkpoint_path):
     config['device'] = device
     
     model.eval()  # 设置为评估模式
-    return model, config
+    # ---> 修正: 返回 tokenizer 以便在外部使用 <---
+    tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_name'])
+    return model, config, tokenizer
 
 def generate_text(model, config, start_text, max_length=100, temperature=0.8, top_k=20):
     """
@@ -117,13 +120,125 @@ def generate_text(model, config, start_text, max_length=100, temperature=0.8, to
 
     return "".join([itos.get(token_id, '?') for token_id in generated_tokens])
 
+
+# ---> 新增: 用于机器翻译的贪心解码函数 <---
+def translate_sentence(model, tokenizer, sentence, config):
+    """使用贪心解码翻译单个句子"""
+    model.eval()
+    device = config['device']
+    
+    # 1. 对源句子进行分词
+    src_tokens = tokenizer.encode(sentence, return_tensors="pt").to(device)
+    src_tokens = src_tokens.t() # [seq_len, 1]
+
+    # ---> 新增: 为源句子创建 padding mask <---
+    pad_token_id = tokenizer.pad_token_id
+    # src_tokens shape: [seq_len, 1], mask shape: [1, seq_len]
+    src_padding_mask = (src_tokens == pad_token_id).transpose(0, 1)
+
+    # 2. 编码源句子，并传入 padding mask
+    with torch.no_grad():
+        # ---> 修正: 将 src_padding_mask 传递给 encoder <---
+        memory = model.encode(src_tokens, src_mask=src_padding_mask)
+
+    # 3. 解码过程
+    # ---> 核心修正: 使用更通用的 BOS token 作为解码起始信号 <---
+    # 检查 tokenizer 是否有 bos_token_id，如果没有，则回退到 pad_token_id
+    start_token = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.pad_token_id
+    tgt_tokens = [start_token]
+    
+    for _ in range(config['max_len']):
+        tgt_tensor = torch.tensor(tgt_tokens).unsqueeze(1).to(device) # [current_len, 1]
+        tgt_mask = torch.triu(torch.ones(len(tgt_tokens), len(tgt_tokens), device=device), diagonal=1).bool()
+
+        with torch.no_grad():
+            # ---> 修正: 将 src_padding_mask 作为 memory_mask 传递给 decoder <---
+            output = model.decode(tgt_tensor, memory, tgt_mask, memory_mask=src_padding_mask)
+            # output: [current_len, 1, vocab_size]
+            next_token_logits = output[-1, 0, :]
+            next_token = next_token_logits.argmax().item()
+        
+        tgt_tokens.append(next_token)
+
+        # 如果生成了 EOS token，则停止
+        if next_token == tokenizer.eos_token_id:
+            break
+            
+    return tokenizer.decode(tgt_tokens, skip_special_tokens=True)
+
+
+# ---> 新增: 功能更强大的 Beam Search 解码函数 <---
+def translate_sentence_beam_search(model, tokenizer, sentence, config, beam_size=3, max_len=None):
+    """使用束搜索 (Beam Search) 翻译单个句子"""
+    model.eval()
+    device = config['device']
+    max_len = max_len if max_len is not None else config['max_len']
+
+    # 1. 编码源句子
+    src_tokens = tokenizer.encode(sentence, return_tensors="pt").to(device).t()
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    src_padding_mask = (src_tokens == pad_token_id).transpose(0, 1)
+    with torch.no_grad():
+        memory = model.encode(src_tokens, src_mask=src_padding_mask)
+
+    # 2. 初始化束
+    start_token = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else pad_token_id
+    beams = [(torch.tensor([start_token], device=device), 0.0)]
+    completed_beams = []
+
+    for _ in range(max_len):
+        new_beams = []
+        for seq, score in beams:
+            if seq[-1].item() == tokenizer.eos_token_id:
+                completed_beams.append((seq, score))
+                continue
+
+            tgt_tensor = seq.unsqueeze(1)
+            tgt_mask = torch.triu(torch.ones(len(seq), len(seq), device=device), diagonal=1).bool()
+            
+            with torch.no_grad():
+                output = model.decode(tgt_tensor, memory, tgt_mask, memory_mask=src_padding_mask)
+                logits = output[-1, 0, :]
+                log_probs = F.log_softmax(logits, dim=-1)
+
+            top_log_probs, top_indices = torch.topk(log_probs, beam_size)
+
+            for i in range(beam_size):
+                next_token = top_indices[i].unsqueeze(0)
+                new_seq = torch.cat([seq, next_token])
+                new_score = score + top_log_probs[i].item()
+                new_beams.append((new_seq, new_score))
+
+        if not new_beams:
+            break
+        
+        beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_size]
+        if all(b[0][-1].item() == tokenizer.eos_token_id for b in beams):
+            completed_beams.extend(beams)
+            break
+
+    completed_beams.extend(beams)
+    if not completed_beams: return ""
+
+    best_beam = sorted(completed_beams, key=lambda x: x[1] / len(x[0]), reverse=True)[0]
+    best_seq = best_beam[0].tolist()
+    
+    return tokenizer.decode(best_seq, skip_special_tokens=True)
+
+
 # 主执行函数
 if __name__ == "__main__":
     checkpoint_path = "best_model_checkpoint.pt"
     
     print(f"--- 正在从 '{checkpoint_path}' 加载模型 ---")
-    model, config = load_model_from_checkpoint(checkpoint_path)
+    # ---> 修正: 接收 tokenizer <---
+    model, config, tokenizer = load_model_from_checkpoint(checkpoint_path)
     print("--- 模型加载成功 ---")
+
+    # ---> 新增代码: 计算并打印模型参数量 <---
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"模型总参数量: {total_params/1e6:.2f} M")
+    print("--------------------")
 
     # 定义生成文本的起始句
     start_text = "To be, or not to be, that is the question:"
@@ -140,3 +255,6 @@ if __name__ == "__main__":
     
     print("\n--- Generated Text ---")
     print(generated_text)
+
+
+    #     print(f"Translated: {translation}")
