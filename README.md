@@ -24,7 +24,7 @@
 │   └── tinyshakespeare.txt
 ├── results/                  # 存放结果和图表
 │   ├── plot_metrics.py       # 绘图脚本
-│   └── training_curves.png   # 生成的图表
+│   └── metrics_iwslt2017.csv #训练损失
 ├── src/                      # 核心源代码
 │   ├── config.py             # 任务和模型配置文件
 │   ├── dataset_utils.py      # 数据加载和预处理
@@ -37,32 +37,26 @@
 ```
 ### 1. 训练模型
 
-使用 `train.py` 脚本开始训练。你可以通过 `--config` 参数选择一个预定义的配置（例如 `tiny_shakespeare`）。
+使用 `train.py` 脚本开始训练。你可以通过 `--config` 参数选择一个预定义的配置（例如 `iwlst2017`）。
 
 **开始一次新训练:**
 ```bash
 # 在第一个可用 GPU 上训练
-python train.py --config tiny_shakespeare
+python train.py --config iwlst2017
 ```
 
 **指定 GPU 并设置总轮次:**
 ```bash
-# 在 1 号 GPU 上训练 400 轮
-CUDA_VISIBLE_DEVICES=1 python train.py --config tiny_shakespeare --epochs 400
-```
-
-**从检查点恢复训练:**
-```bash
-CUDA_VISIBLE_DEVICES=1 python train.py --config tiny_shakespeare --resume --epochs 500
+# 在 1 号 GPU 上训练 10 轮
+CUDA_VISIBLE_DEVICES=1 python train.py --config tiny_shakespeare --epochs 10
 ```
 
 ### 3. 评估与文本生成
 
-训练完成后，`best_model_checkpoint.pt` 文件会被保存在项目根目录。运行 `eval.py` 来加载模型并生成文本。
+训练完成后，`best_model_checkpoint.pt` 文件会被保存在项目根目录。运行 `eval.py` 来加载模型并。
 ```bash
 python eval.py
 ```
-你可以直接在 `eval.py` 脚本的 `if __name__ == "__main__"` 部分修改起始文本、生成长度和采样参数。
 
 ### 4. 可视化训练过程
 
@@ -81,30 +75,4 @@ python results/plot_metrics.py
 - `ag_news`: 用于新闻文本分类。
 ```
 
----
-
-### `requirements.txt`
-
-这个文件列出了项目运行所需的所有 Python 库。用户可以通过 `pip install -r requirements.txt` 一键安装。
-
-````text
-// filepath: f:\transformer-project\requirements.txt
-# Core deep learning framework
-torch
-torchvision
-torchaudio
-
-# Hugging Face libraries for datasets and tokenizers
-datasets
-transformers
-
-# Utilities
-tqdm         # Progress bars
-requests     # For downloading data if needed
-
-# For plotting results
-pandas
-matplotlib
-```// filepath: f:\transformer-project\README.md
-# Transformer Model Implementation in PyTorch
 
